@@ -6,7 +6,6 @@ import calendar
 import html
 import json
 import os
-import time
 import urllib.request
 from datetime import date, datetime, timezone
 
@@ -59,6 +58,13 @@ def gh(url, payload=None):
         return r.status, json.loads(r.read() or "{}")
 
 
+def graphql(query, variables=None):
+    _, resp = gh("https://api.github.com/graphql", {"query": query, "variables": variables or {}})
+    if resp.get("errors"):
+        raise RuntimeError(resp["errors"])
+    return resp["data"]
+
+
 def age(b, t):
     years = t.year - b.year - ((t.month, t.day) < (b.month, b.day))
     months = (t.month - b.month - (t.day < b.day)) % 12
@@ -79,6 +85,7 @@ def fetch_stats():
     query = f"""
     query {{
       user(login: "{USER}") {{
+        id
         followers {{ totalCount }}
         repositories(first: 100, ownerAffiliations: OWNER) {{
           totalCount
@@ -90,8 +97,7 @@ def fetch_stats():
         {yr_aliases}
       }}
     }}"""
-    _, resp = gh("https://api.github.com/graphql", {"query": query})
-    u = resp["data"]["user"]
+    u = graphql(query)["user"]
     commits = sum(
         v["totalCommitContributions"] + v["restrictedContributionsCount"]
         for k, v in u.items() if k.startswith("y")
@@ -103,27 +109,42 @@ def fetch_stats():
         "stars": sum(n["stargazerCount"] for n in u["repositories"]["nodes"]),
         "commits": commits,
     }
-    stats.update(loc([n["name"] for n in u["repositories"]["nodes"] if not n["isFork"]]))
+    stats.update(loc([n["name"] for n in u["repositories"]["nodes"] if not n["isFork"]], u["id"]))
     return stats
 
 
-def loc(repo_names):
+LOC_QUERY = """
+query($owner: String!, $name: String!, $id: ID!, $cursor: String) {
+  repository(owner: $owner, name: $name) {
+    defaultBranchRef { target { ... on Commit {
+      history(first: 100, author: {id: $id}, after: $cursor) {
+        pageInfo { hasNextPage endCursor }
+        nodes { additions deletions }
+      }
+    } } }
+  }
+}"""
+
+
+def loc(repo_names, user_id):
+    # ponytail: REST stats/contributors answers 202 forever to the Actions token,
+    # so walk own commits on the default branch via GraphQL instead
     add = rem = 0
     for name in repo_names:
-        for attempt in range(10):
-            try:
-                status, data = gh(f"https://api.github.com/repos/{USER}/{name}/stats/contributors")
-            except Exception as e:
-                print(f"loc {name}: {e}")
-                break  # inaccessible repo: skip rather than kill the whole run
-            print(f"loc {name}: attempt {attempt} -> {status}")
-            if status == 200 and isinstance(data, list):
-                for c in data:
-                    if c.get("author", {}).get("login") == USER:
-                        add += sum(w["a"] for w in c["weeks"])
-                        rem += sum(w["d"] for w in c["weeks"])
-                break
-            time.sleep(6)  # 202 = stats still being computed server-side
+        cursor = None
+        try:
+            while True:
+                ref = graphql(LOC_QUERY, {"owner": USER, "name": name, "id": user_id, "cursor": cursor})["repository"]["defaultBranchRef"]
+                if ref is None:
+                    break  # empty repo
+                h = ref["target"]["history"]
+                add += sum(n["additions"] for n in h["nodes"])
+                rem += sum(n["deletions"] for n in h["nodes"])
+                if not h["pageInfo"]["hasNextPage"]:
+                    break
+                cursor = h["pageInfo"]["endCursor"]
+        except Exception as e:
+            print(f"loc {name}: {e}")
     return {"loc_add": add, "loc_del": rem, "loc": add - rem}
 
 
