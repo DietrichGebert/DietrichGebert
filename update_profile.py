@@ -45,21 +45,25 @@ ART = r"""
                .=*#####*=.
 """
 
+# two tokens by design: the Actions GITHUB_TOKEN yields the contribution-style
+# commit count (public + private activity), while a PAT (ACCESS_TOKEN secret)
+# sees private repos for the repo list and LOC walk. Either falls back to the other.
 TOKEN = os.environ.get("GITHUB_TOKEN") or os.environ.get("ACCESS_TOKEN") or ""
+PRIV_TOKEN = os.environ.get("ACCESS_TOKEN") or TOKEN
 
 
-def gh(url, payload=None):
+def gh(url, payload=None, token=None):
     req = urllib.request.Request(
         url,
         data=json.dumps(payload).encode() if payload else None,
-        headers={"Authorization": f"Bearer {TOKEN}", "Accept": "application/vnd.github+json"},
+        headers={"Authorization": f"Bearer {token or TOKEN}", "Accept": "application/vnd.github+json"},
     )
     with urllib.request.urlopen(req) as r:
         return r.status, json.loads(r.read() or "{}")
 
 
-def graphql(query, variables=None):
-    _, resp = gh("https://api.github.com/graphql", {"query": query, "variables": variables or {}})
+def graphql(query, variables=None, token=None):
+    _, resp = gh("https://api.github.com/graphql", {"query": query, "variables": variables or {}}, token)
     if resp.get("errors"):
         raise RuntimeError(resp["errors"])
     return resp["data"]
@@ -82,7 +86,12 @@ def fetch_stats():
         " { totalCommitContributions restrictedContributionsCount }"
         for y in range(JOINED_YEAR, datetime.now(timezone.utc).year + 1)
     )
-    query = f"""
+    contrib = graphql(f'query {{ user(login: "{USER}") {{ {yr_aliases} }} }}')["user"]
+    commits = sum(
+        v["totalCommitContributions"] + v["restrictedContributionsCount"]
+        for v in contrib.values()
+    )
+    u = graphql(f"""
     query {{
       user(login: "{USER}") {{
         id
@@ -94,14 +103,8 @@ def fetch_stats():
         repositoriesContributedTo(first: 1, contributionTypes: [COMMIT, PULL_REQUEST, REPOSITORY]) {{
           totalCount
         }}
-        {yr_aliases}
       }}
-    }}"""
-    u = graphql(query)["user"]
-    commits = sum(
-        v["totalCommitContributions"] + v["restrictedContributionsCount"]
-        for k, v in u.items() if k.startswith("y")
-    )
+    }}""", token=PRIV_TOKEN)["user"]
     stats = {
         "followers": u["followers"]["totalCount"],
         "repos": u["repositories"]["totalCount"],
@@ -134,7 +137,7 @@ def loc(repo_names, user_id):
         cursor = None
         try:
             while True:
-                ref = graphql(LOC_QUERY, {"owner": USER, "name": name, "id": user_id, "cursor": cursor})["repository"]["defaultBranchRef"]
+                ref = graphql(LOC_QUERY, {"owner": USER, "name": name, "id": user_id, "cursor": cursor}, token=PRIV_TOKEN)["repository"]["defaultBranchRef"]
                 if ref is None:
                     break  # empty repo
                 h = ref["target"]["history"]
