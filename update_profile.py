@@ -110,15 +110,18 @@ def fetch_stats():
 def loc(repo_names):
     add = rem = 0
     for name in repo_names:
-        for attempt in range(6):
-            status, data = gh(f"https://api.github.com/repos/{USER}/{name}/stats/contributors")
+        for attempt in range(10):
+            try:
+                status, data = gh(f"https://api.github.com/repos/{USER}/{name}/stats/contributors")
+            except Exception:
+                break  # inaccessible repo: skip rather than kill the whole run
             if status == 200 and isinstance(data, list):
                 for c in data:
                     if c.get("author", {}).get("login") == USER:
                         add += sum(w["a"] for w in c["weeks"])
                         rem += sum(w["d"] for w in c["weeks"])
                 break
-            time.sleep(3)  # 202 = stats still being computed server-side
+            time.sleep(6)  # 202 = stats still being computed server-side
     return {"loc_add": add, "loc_del": rem, "loc": add - rem}
 
 
