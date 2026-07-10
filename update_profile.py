@@ -113,8 +113,10 @@ def loc(repo_names):
         for attempt in range(10):
             try:
                 status, data = gh(f"https://api.github.com/repos/{USER}/{name}/stats/contributors")
-            except Exception:
+            except Exception as e:
+                print(f"loc {name}: {e}")
                 break  # inaccessible repo: skip rather than kill the whole run
+            print(f"loc {name}: attempt {attempt} -> {status}")
             if status == 200 and isinstance(data, list):
                 for c in data:
                     if c.get("author", {}).get("login") == USER:
